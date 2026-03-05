@@ -14,10 +14,16 @@ const PORT = 3000;
 app.use(express.json());
 
 // Supabase Service Client (for background tasks)
-const supabase = createClient(
-  process.env.VITE_SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-);
+const supabaseUrl = process.env.VITE_SUPABASE_URL;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabase =
+  supabaseUrl && supabaseServiceRoleKey
+    ? createClient(supabaseUrl, supabaseServiceRoleKey)
+    : null;
+
+if (!supabase) {
+  console.warn('Supabase service credentials missing. Cron jobs and APIs will error without them.');
+}
 
 // Twilio Client
 const getTwilio = () => {
@@ -28,71 +34,77 @@ const getTwilio = () => {
 };
 
 // Nag Logic: Cron job every minute
-cron.schedule('* * * * *', async () => {
-  console.log('Running Nag Check...');
-  const now = new Date().toISOString();
-  
-  // Find tasks that are:
-  // 1. Pending
-  // 2. Start time is in the past
-  // 3. Haven't been nagged in the last 5 minutes (or ever)
-  
-  const { data: tasks, error } = await supabase
-    .from('tasks')
-    .select('*')
-    .eq('status', 'pending')
-    .lte('start_time', now);
+if (supabase) {
+  cron.schedule('* * * * *', async () => {
+    console.log('Running Nag Check...');
+    const now = new Date().toISOString();
 
-  if (error) {
-    console.error('Error fetching tasks for cron:', error);
-    return;
-  }
+    // Find tasks that are:
+    // 1. Pending
+    // 2. Start time is in the past
+    // 3. Haven't been nagged in the last 5 minutes (or ever)
 
-  const twilioClient = getTwilio();
-  if (!twilioClient) {
-    console.warn('Twilio not configured, skipping nags');
-    return;
-  }
+    const { data: tasks, error } = await supabase
+      .from('tasks')
+      .select('*')
+      .eq('status', 'pending')
+      .lte('start_time', now);
 
-  for (const task of tasks) {
-    const lastNag = task.last_nag_at ? new Date(task.last_nag_at) : new Date(0);
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    if (error) {
+      console.error('Error fetching tasks for cron:', error);
+      return;
+    }
 
-    if (lastNag < fiveMinutesAgo) {
-      let message = '';
-      switch (task.aggression_level) {
-        case 'Drill Sergeant':
-          message = `[NUDGE] GET UP! You have "${task.title}" scheduled and you're SLACKING. Check in NOW or I'll keep screaming.`;
-          break;
-        case 'Firm':
-          message = `[NUDGE] Reminder: "${task.title}" started. Please check in to confirm you're on it.`;
-          break;
-        default:
-          message = `[NUDGE] Hi! Just a friendly nudge for "${task.title}". Hope it's going well!`;
-      }
+    const twilioClient = getTwilio();
+    if (!twilioClient) {
+      console.warn('Twilio not configured, skipping nags');
+      return;
+    }
 
-      try {
-        await twilioClient.messages.create({
-          body: message,
-          from: process.env.TWILIO_PHONE_NUMBER,
-          to: process.env.USER_PHONE_NUMBER || '', // In a real app, this would be task.user_phone
-        });
+    for (const task of tasks) {
+      const lastNag = task.last_nag_at ? new Date(task.last_nag_at) : new Date(0);
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
 
-        await supabase
-          .from('tasks')
-          .update({ last_nag_at: new Date().toISOString() })
-          .eq('id', task.id);
-          
-        console.log(`Nagged for task: ${task.title}`);
-      } catch (err) {
-        console.error('Failed to send SMS:', err);
+      if (lastNag < fiveMinutesAgo) {
+        let message = '';
+        switch (task.aggression_level) {
+          case 'Drill Sergeant':
+            message = `[NUDGE] GET UP! You have "${task.title}" scheduled and you're SLACKING. Check in NOW or I'll keep screaming.`;
+            break;
+          case 'Firm':
+            message = `[NUDGE] Reminder: "${task.title}" started. Please check in to confirm you're on it.`;
+            break;
+          default:
+            message = `[NUDGE] Hi! Just a friendly nudge for "${task.title}". Hope it's going well!`;
+        }
+
+        try {
+          await twilioClient.messages.create({
+            body: message,
+            from: process.env.TWILIO_PHONE_NUMBER,
+            to: process.env.USER_PHONE_NUMBER || '', // In a real app, this would be task.user_phone
+          });
+
+          await supabase
+            .from('tasks')
+            .update({ last_nag_at: new Date().toISOString() })
+            .eq('id', task.id);
+
+          console.log(`Nagged for task: ${task.title}`);
+        } catch (err) {
+          console.error('Failed to send SMS:', err);
+        }
       }
     }
-  }
-});
-
+  });
+} else {
+  console.warn('Skipping nag cron because Supabase is not configured.');
+}
 // API Routes
 app.post("/api/tasks/check-in", async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ error: 'Supabase is not configured.' });
+  }
   const { taskId } = req.body;
   const { error } = await supabase
     .from('tasks')
