@@ -1,0 +1,5 @@
+{
+  "name": "2Bot",
+  "description": "An aggressive personal assistant calendar that nags you via SMS until you get things done.",
+  "requestFramePermissions": []
+}
